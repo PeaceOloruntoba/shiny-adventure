@@ -22,6 +22,8 @@ class User extends Authenticatable
         'name',
         'email',
         'password',
+        'is_admin',
+        'api_token',
     ];
 
     /**
@@ -32,6 +34,7 @@ class User extends Authenticatable
     protected $hidden = [
         'password',
         'remember_token',
+        'api_token',
     ];
 
     /**
@@ -44,6 +47,7 @@ class User extends Authenticatable
         return [
             'email_verified_at' => 'datetime',
             'password' => 'hashed',
+            'is_admin' => 'boolean',
         ];
     }
 
@@ -57,5 +61,16 @@ class User extends Authenticatable
             ->take(2)
             ->map(fn ($word) => Str::substr($word, 0, 1))
             ->implode('');
+    }
+
+    /**
+     * Generate and persist a new API token for this user.
+     */
+    public function generateApiToken(): string
+    {
+        $token = bin2hex(random_bytes(32));
+        $this->api_token = $token;
+        $this->save();
+        return $token;
     }
 }
