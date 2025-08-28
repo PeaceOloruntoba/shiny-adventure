@@ -7,6 +7,7 @@ use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Str;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Facades\Log;
 use App\Mail\GeneratedApplication;
 use App\Models\Application;
 use Illuminate\Support\Facades\Auth;
@@ -48,26 +49,66 @@ class ApplicationController extends Controller
             }
         }
 
-        // Extract text from uploaded files (best-effort) to improve AI context
-        $extracted = $this->extractFileTexts($storedFiles);
+        // Auth user for logging and ownership
+        $user = Auth::user();
+
+        // Build public URLs so AI can access uploads if needed (no local parsing)
+        $fileUrls = [];
+        foreach ($storedFiles as $p) {
+            $fileUrls[] = Storage::disk('public')->url($p);
+        }
+        $imageUrls = [];
+        foreach ($storedImages as $p) {
+            $imageUrls[] = Storage::disk('public')->url($p);
+        }
 
         $prompt = $this->buildPrompt(
             $validated['name'],
             $validated['notes'] ?? '',
             count($storedImages),
             array_map(fn($p) => basename($p), $storedFiles),
-            $extracted
+            $fileUrls,
+            $imageUrls
         );
 
-        $generated = $this->generateWithOpenAI($prompt);
+        Log::info('AI prompt built', [
+            'user' => $user?->id,
+            'name' => $validated['name'],
+            'email' => $validated['email'],
+            'images_count' => count($storedImages),
+            'files_count' => count($storedFiles),
+            'file_names' => array_map(fn($p) => basename($p), $storedFiles),
+            'file_urls' => $fileUrls,
+            'image_urls' => $imageUrls,
+        ]);
+
+        // Upload user files to OpenAI and call Responses API with attachments
+        Log::info('OpenAI request starting', [
+            'model' => 'gpt-4o-mini',
+            'prompt_chars' => strlen($prompt),
+        ]);
+
+        $fileIds = [];
+        try {
+            $fileIds = $this->uploadFilesToOpenAI(array_merge($storedFiles, $storedImages));
+            Log::info('OpenAI files uploaded', ['count' => count($fileIds)]);
+        } catch (\Throwable $e) {
+            Log::warning('OpenAI file upload failed; continuing without files', ['message' => $e->getMessage()]);
+        }
+
+        $generated = $this->generateWithAssistant($prompt, $fileIds);
 
         // Fallback if OpenAI fails
         if (!$generated) {
+            Log::warning('OpenAI generation failed; using fallback letter');
             $generated = $this->fallbackLetter($validated['name'], $validated['notes'] ?? '');
         }
+        Log::info('OpenAI response received', [
+            'response_preview' => Str::limit($generated, 200),
+            'response_chars' => strlen($generated),
+        ]);
 
         // Persist record and write files
-        $user = Auth::user();
         $timestamp = now()->format('Ymd_His');
         $safeSlug = Str::slug($validated['name']) ?: 'application';
         $baseDir = "generated/{$safeSlug}_{$timestamp}";
@@ -78,9 +119,9 @@ class ApplicationController extends Controller
 
         // Try to generate DOCX using PHPWord if available
         $docxPath = null;
-        $pdfPath = null;
         try {
             if (class_exists('PhpOffice\\PhpWord\\PhpWord')) {
+                Log::info('DOCX generation starting');
                 $docxPath = $this->generateDocxFromTemplate(
                     name: $validated['name'],
                     body: $generated,
@@ -89,13 +130,10 @@ class ApplicationController extends Controller
                     email: $validated['email'] ?? '',
                     notes: $validated['notes'] ?? ''
                 );
-            }
-            // Optionally generate PDF if Dompdf is available
-            if (class_exists('Dompdf\\Dompdf')) {
-                $pdfPath = $this->generatePdf($validated['name'], $generated, $baseDir, $timestamp);
+                Log::info('DOCX generation finished', ['relative_docx' => $docxPath]);
             }
         } catch (\Throwable $e) {
-            // silently ignore in minimal sample
+            Log::error('DOCX generation error', ['message' => $e->getMessage()]);
         }
 
         $application = Application::create([
@@ -113,44 +151,48 @@ class ApplicationController extends Controller
             ],
         ]);
 
-        // Email the generated content with attachments; queue when worker is running, otherwise send immediately
+        // Email the generated content with attachments immediately (Brevo SMTP configured in .env)
         $absoluteDocx = $application->docx_path ?: null;
-        $absolutePdf = $pdfPath ? Storage::disk('public')->path($pdfPath) : null;
         $mailable = new GeneratedApplication(
             name: $validated['name'],
             body: $generated,
             docxPath: $absoluteDocx,
-            pdfPath: $absolutePdf,
         );
-
-        // Prefer immediate send unless explicitly opted-in to queue via MAIL_QUEUE=true
-        $useQueue = filter_var(env('MAIL_QUEUE', false), FILTER_VALIDATE_BOOL);
-        if ($useQueue) {
-            Mail::to($validated['email'])->queue($mailable);
-        } else {
+        try {
+            $mailConfig = [
+                'MAIL_MAILER' => env('MAIL_MAILER'),
+                'MAIL_HOST' => env('MAIL_HOST'),
+                'MAIL_PORT' => env('MAIL_PORT'),
+                'MAIL_ENCRYPTION' => env('MAIL_ENCRYPTION'),
+                'MAIL_FROM_ADDRESS' => env('MAIL_FROM_ADDRESS'),
+                'MAIL_FROM_NAME' => env('MAIL_FROM_NAME'),
+                'queue' => (bool) env('MAIL_QUEUE', false),
+            ];
+            Log::info('Sending email', [
+                'to' => $validated['email'],
+                'has_docx' => (bool) $absoluteDocx,
+                'txt_path' => $txtPath,
+                'mail_config' => $mailConfig,
+            ]);
             Mail::to($validated['email'])->send($mailable);
+            Log::info('Email sent');
+        } catch (\Throwable $e) {
+            // log and continue to UI
+            Log::error('Mail send failed', ['message' => $e->getMessage()]);
         }
 
         return to_route('applications.index')->with('status', __('messages.sent_success'));
     }
 
-    protected function buildPrompt(string $name, string $notes, int $imageCount, array $fileNames, array $extractedTexts = []): string
+    protected function buildPrompt(string $name, string $notes, int $imageCount, array $fileNames, array $fileUrls = [], array $imageUrls = []): string
     {
         $fileList = empty($fileNames) ? 'none' : implode(', ', $fileNames);
         $notes = trim($notes);
-        $excerpts = '';
-        if (!empty($extractedTexts)) {
-            $snippets = [];
-            foreach ($extractedTexts as $fname => $text) {
-                $clean = trim(preg_replace('/\s+/', ' ', $text ?? ''));
-                if ($clean !== '') {
-                    $snippets[] = "From {$fname}: " . Str::limit($clean, 600);
-                }
-                if (count($snippets) >= 3) break; // avoid overly long prompts
-            }
-            if (!empty($snippets)) {
-                $excerpts = "\nExtracted content from uploads (excerpts):\n- " . implode("\n- ", $snippets) . "\n";
-            }
+        $urlBlock = '';
+        if (!empty($fileUrls) || !empty($imageUrls)) {
+            $urlBlock = "\nYou can access the user's uploaded files via these URLs:\n" .
+                (empty($fileUrls) ? '' : ('Files:\n- '.implode("\n- ", $fileUrls).'\n')) .
+                (empty($imageUrls) ? '' : ('Images:\n- '.implode("\n- ", $imageUrls).'\n'));
         }
 
         return <<<PROMPT
@@ -165,8 +207,10 @@ Requirements:
 Candidate name: {$name}
 Additional notes/context from user: "{$notes}"
 Number of images uploaded: {$imageCount}
-Other files uploaded (names only, content not parsed): {$fileList}
-{$excerpts}
+Other files uploaded (names only): {$fileList}
+
+IMPORTANT: Assume the CV/resume uploaded contains the candidate's contact info and experiences. Craft a professional letter that integrates typical contact lines and relevant achievements, even if the raw files are not parsed.
+{$urlBlock}
 
 Return only the letter text suitable for emailing.
 PROMPT;
@@ -206,64 +250,212 @@ PROMPT;
     }
 
     /**
-     * Best-effort extraction of text from uploaded files to inform AI prompt.
-     * Supports .txt directly; for .docx reads word/document.xml; ignores binaries.
-     * Returns [filename => text].
+     * Get OPENAI_ASSISTANT_ID from env or create a minimal assistant (with file_search tool) on the fly.
      */
-    protected function extractFileTexts(array $storedFiles): array
+    protected function getOrCreateAssistantId(): ?string
     {
-        $out = [];
-        foreach ($storedFiles as $relative) {
-            try {
-                $path = Storage::disk('public')->path($relative);
-                $name = basename($relative);
-                $ext = strtolower(pathinfo($path, PATHINFO_EXTENSION));
-                if ($ext === 'txt') {
-                    $out[$name] = Str::limit(@file_get_contents($path) ?: '', 4000);
-                } elseif ($ext === 'docx') {
-                    $zip = new \ZipArchive();
-                    if ($zip->open($path) === true) {
-                        $xml = $zip->getFromName('word/document.xml');
-                        $zip->close();
-                        if ($xml) {
-                            $text = strip_tags(str_replace(['</w:p>', '</w:tr>'], "\n", $xml));
-                            $out[$name] = Str::limit($text, 4000);
-                        }
-                    }
-                }
-            } catch (\Throwable $e) {
-                // ignore individual extraction errors
-            }
+        $apiKey = config('services.openai.key') ?? env('OPENAI_API_KEY') ?? env('OPEN_API_KEY');
+        if (!$apiKey) { return null; }
+
+        $assistantId = env('OPENAI_ASSISTANT_ID');
+        if ($assistantId) {
+            return $assistantId;
         }
-        return $out;
+
+        try {
+            $payload = [
+                'model' => 'gpt-4o-mini',
+                'name' => 'ShinyAdventure Cover Letter Assistant',
+                'instructions' => 'You help generate concise, personalized job application letters using user prompts and attached files. Use file_search to extract relevant details if needed.',
+                'tools' => [ ['type' => 'file_search'] ],
+            ];
+            $res = Http::timeout(30)
+                ->withToken($apiKey)
+                ->withHeaders(['OpenAI-Beta' => 'assistants=v2'])
+                ->acceptJson()
+                ->post('https://api.openai.com/v1/assistants', $payload);
+            if ($res->successful()) {
+                $id = $res->json('id');
+                Log::info('OpenAI assistant created', ['assistant_id' => $id]);
+                return $id;
+            }
+            Log::error('OpenAI assistant create failed', ['status' => $res->status(), 'body' => Str::limit($res->body(), 500)]);
+        } catch (\Throwable $e) {
+            Log::error('OpenAI assistant create exception', ['message' => $e->getMessage()]);
+        }
+        return null;
     }
 
     /**
-     * Generate a simple PDF via Dompdf (if installed). Returns relative path on public disk.
+     * Upload an array of relative public-disk paths to OpenAI Files API for assistants/responses usage.
+     * Returns an array of file_ids.
      */
-    protected function generatePdf(string $name, string $body, string $baseDir, string $timestamp): ?string
+    protected function uploadFilesToOpenAI(array $relativePaths): array
     {
-        try {
-            $html = view('application.pdf', [
-                'name' => $name,
-                'body' => nl2br(e($body)),
-                'date' => now()->format('Y-m-d'),
-            ])->render();
+        $apiKey = config('services.openai.key') ?? env('OPENAI_API_KEY') ?? env('OPEN_API_KEY');
+        if (!$apiKey) {
+            return [];
+        }
 
-            $options = new \Dompdf\Options();
-            $options->set('isRemoteEnabled', true);
-            $dompdf = new \Dompdf\Dompdf($options);
-            $dompdf->loadHtml($html);
-            $dompdf->setPaper('A4', 'portrait');
-            $dompdf->render();
+        $ids = [];
+        foreach ($relativePaths as $rel) {
+            try {
+                $abs = Storage::disk('public')->path($rel);
+                if (!is_file($abs)) { continue; }
+                $name = basename($abs);
+                $mime = @mime_content_type($abs) ?: 'application/octet-stream';
+                $response = Http::timeout(60)
+                    ->withToken($apiKey)
+                    ->attach('file', file_get_contents($abs), $name)
+                    ->asMultipart()
+                    ->post('https://api.openai.com/v1/files', [
+                        ['name' => 'purpose', 'contents' => 'assistants'],
+                    ]);
+                if ($response->successful()) {
+                    $data = $response->json();
+                    if (!empty($data['id'])) {
+                        $ids[] = $data['id'];
+                    }
+                } else {
+                    Log::warning('OpenAI file upload error', ['name' => $name, 'status' => $response->status(), 'body' => Str::limit($response->body(), 300)]);
+                }
+            } catch (\Throwable $e) {
+                Log::warning('OpenAI file upload exception', ['file' => $rel, 'message' => $e->getMessage()]);
+            }
+        }
+        return $ids;
+    }
 
-            $relative = "$baseDir/application_{$timestamp}.pdf";
-            Storage::disk('public')->put($relative, $dompdf->output());
-            return $relative;
-        } catch (\Throwable $e) {
+    /**
+     * Generate text using OpenAI Assistants Threads/Runs with file attachments.
+     */
+    protected function generateWithAssistant(string $prompt, array $fileIds): ?string
+    {
+        $apiKey = config('services.openai.key') ?? env('OPENAI_API_KEY') ?? env('OPEN_API_KEY');
+        if (!$apiKey) {
             return null;
         }
+
+        try {
+            // 1) Create thread
+            $threadRes = Http::timeout(30)
+                ->withToken($apiKey)
+                ->withHeaders(['OpenAI-Beta' => 'assistants=v2'])
+                ->acceptJson()
+                ->post('https://api.openai.com/v1/threads', []);
+            if (!$threadRes->successful()) {
+                Log::error('OpenAI thread create failed', ['status' => $threadRes->status(), 'body' => Str::limit($threadRes->body(), 500)]);
+                return null;
+            }
+            $threadId = $threadRes->json('id');
+            Log::info('OpenAI thread created', ['thread_id' => $threadId]);
+
+            // 2) Create user message with attachments
+            $msgPayload = [
+                'role' => 'user',
+                'content' => $prompt,
+            ];
+            if (!empty($fileIds)) {
+                $attachments = [];
+                foreach ($fileIds as $fid) {
+                    $attachments[] = [
+                        'file_id' => $fid,
+                        'tools' => [['type' => 'file_search']],
+                    ];
+                }
+                $msgPayload['attachments'] = $attachments;
+            }
+            $msgRes = Http::timeout(60)
+                ->withToken($apiKey)
+                ->withHeaders(['OpenAI-Beta' => 'assistants=v2'])
+                ->acceptJson()
+                ->post("https://api.openai.com/v1/threads/{$threadId}/messages", $msgPayload);
+            if (!$msgRes->successful()) {
+                Log::error('OpenAI message create failed', ['status' => $msgRes->status(), 'body' => Str::limit($msgRes->body(), 500)]);
+                return null;
+            }
+            Log::info('OpenAI message created');
+
+            // 3) Start run (ensure we have an assistant_id)
+            $assistantId = $this->getOrCreateAssistantId();
+            if (!$assistantId) {
+                Log::error('No assistant_id available');
+                return null;
+            }
+            $runPayload = [
+                'assistant_id' => $assistantId,
+            ];
+            // When files provided, declare file_search tool
+            if (!empty($fileIds)) {
+                $runPayload['tools'] = [['type' => 'file_search']];
+            }
+
+            $runRes = Http::timeout(60)
+                ->withToken($apiKey)
+                ->withHeaders(['OpenAI-Beta' => 'assistants=v2'])
+                ->acceptJson()
+                ->post("https://api.openai.com/v1/threads/{$threadId}/runs", array_filter($runPayload));
+            if (!$runRes->successful()) {
+                Log::error('OpenAI run create failed', ['status' => $runRes->status(), 'body' => Str::limit($runRes->body(), 500)]);
+                return null;
+            }
+            $runId = $runRes->json('id');
+            Log::info('OpenAI run started', ['run_id' => $runId]);
+
+            // 4) Poll run status
+            $deadline = now()->addSeconds(60);
+            while (now()->lt($deadline)) {
+                usleep(500000); // 0.5s
+                $getRun = Http::timeout(30)
+                    ->withToken($apiKey)
+                    ->withHeaders(['OpenAI-Beta' => 'assistants=v2'])
+                    ->acceptJson()
+                    ->get("https://api.openai.com/v1/threads/{$threadId}/runs/{$runId}");
+                if (!$getRun->successful()) {
+                    Log::warning('OpenAI run poll failed', ['status' => $getRun->status(), 'body' => Str::limit($getRun->body(), 300)]);
+                    continue;
+                }
+                $status = $getRun->json('status');
+                if (in_array($status, ['completed', 'failed', 'cancelled', 'expired'])) {
+                    Log::info('OpenAI run finished', ['status' => $status]);
+                    if ($status !== 'completed') {
+                        return null;
+                    }
+                    break;
+                }
+            }
+
+            // 5) Retrieve latest message(s)
+            $msgList = Http::timeout(30)
+                ->withToken($apiKey)
+                ->withHeaders(['OpenAI-Beta' => 'assistants=v2'])
+                ->acceptJson()
+                ->get("https://api.openai.com/v1/threads/{$threadId}/messages", [
+                    'limit' => 1,
+                    'order' => 'desc',
+                ]);
+            if (!$msgList->successful()) {
+                Log::error('OpenAI messages fetch failed', ['status' => $msgList->status(), 'body' => Str::limit($msgList->body(), 500)]);
+                return null;
+            }
+            $messages = $msgList->json('data') ?? [];
+            foreach ($messages as $m) {
+                if (($m['role'] ?? '') === 'assistant') {
+                    // content can be array of parts
+                    $content = $m['content'][0]['text']['value'] ?? null;
+                    if (is_string($content) && trim($content) !== '') {
+                        return trim($content);
+                    }
+                }
+            }
+            Log::warning('OpenAI assistant response had no text');
+        } catch (\Throwable $e) {
+            Log::error('OpenAI assistants exception', ['message' => $e->getMessage()]);
+        }
+        return null;
     }
+
+    // Removed file extraction and PDF generation per user request to keep prompt form-only and output DOCX/TXT
 
     protected function fallbackLetter(string $name, string $notes): string
     {
