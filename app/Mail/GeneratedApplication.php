@@ -26,16 +26,11 @@ class GeneratedApplication extends Mailable implements ShouldQueue
 
     public function build()
     {
-        $filename = 'application_' . now()->format('Ymd_His') . '.txt';
-
         $mail = $this->subject(__('messages.email_subject'))
             ->view('emails.application')
             ->with([
                 'name' => $this->name,
                 'bodyText' => $this->bodyText,
-            ])
-            ->attachData($this->bodyText, $filename, [
-                'mime' => 'text/plain',
             ]);
 
         if ($this->docxPath && file_exists($this->docxPath)) {

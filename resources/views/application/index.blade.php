@@ -39,11 +39,12 @@
                                     <div class="text-xs text-gray-500">{{ $app->created_at->toDayDateTimeString() }}</div>
                                 </div>
                                 <div class="flex items-center gap-2 shrink-0">
-                                    @if($app->txt_path)
-                                        <a class="px-3 py-1.5 text-sm rounded-md border hover:bg-gray-50" href="{{ route('applications.download', [$app, 'txt']) }}">TXT</a>
-                                    @endif
                                     @if($app->docx_path)
                                         <a class="px-3 py-1.5 text-sm rounded-md border hover:bg-gray-50" href="{{ route('applications.download', [$app, 'docx']) }}">DOCX</a>
+                                    @endif
+                                    @php($pdfRel = data_get($app->meta, 'pdf_rel'))
+                                    @if($pdfRel)
+                                        <a class="px-3 py-1.5 text-sm rounded-md border hover:bg-gray-50" href="{{ route('applications.download', [$app, 'pdf']) }}">PDF</a>
                                     @endif
                                 </div>
                             </div>

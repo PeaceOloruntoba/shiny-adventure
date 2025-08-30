@@ -14,6 +14,9 @@ use Illuminate\Support\Facades\Auth;
 
 class ApplicationController extends Controller
 {
+    // Track the last assistants call context for file retrieval
+    protected ?string $lastThreadId = null;
+    protected ?string $lastRunId = null;
     public function create()
     {
         return view('application.form');
@@ -90,7 +93,18 @@ class ApplicationController extends Controller
 
         $fileIds = [];
         try {
+            // 1) Upload user files from public storage
             $fileIds = $this->uploadFilesToOpenAI(array_merge($storedFiles, $storedImages));
+            // 2) Upload our DOCX/PDF templates each request for best fidelity
+            $templateAbs = [];
+            $docxTpl = base_path('doc/Vorlage Zander Rohan.docx');
+            $pdfTpl  = base_path('doc/Vorlage Zander Rohan.pdf');
+            if (is_file($docxTpl)) { $templateAbs[] = $docxTpl; }
+            if (is_file($pdfTpl)) { $templateAbs[] = $pdfTpl; }
+            if (!empty($templateAbs)) {
+                $tplIds = $this->uploadAbsoluteFilesToOpenAI($templateAbs);
+                $fileIds = array_merge($fileIds, $tplIds);
+            }
             Log::info('OpenAI files uploaded', ['count' => count($fileIds)]);
         } catch (\Throwable $e) {
             Log::warning('OpenAI file upload failed; continuing without files', ['message' => $e->getMessage()]);
@@ -112,16 +126,30 @@ class ApplicationController extends Controller
         $timestamp = now()->format('Ymd_His');
         $safeSlug = Str::slug($validated['name']) ?: 'application';
         $baseDir = "generated/{$safeSlug}_{$timestamp}";
-
-        // Save txt
-        $txtPath = "$baseDir/application_$timestamp.txt";
-        Storage::disk('public')->put($txtPath, $generated);
+        // No TXT anymore – AI will produce DOCX/PDF. We'll still keep fallback DOCX if needed.
 
         // Try to generate DOCX using PHPWord if available
         $docxPath = null;
+        $pdfPath = null;
         try {
-            if (class_exists('PhpOffice\\PhpWord\\PhpWord')) {
-                Log::info('DOCX generation starting');
+            // Attempt to fetch AI-generated files from the Assistants run (docx/pdf)
+            $aiFiles = $this->fetchAssistantOutputFiles();
+            // Save files if present
+            if (!empty($aiFiles)) {
+                foreach ($aiFiles as $aiFile) {
+                    // Download content
+                    $savedRel = $this->downloadOpenAIFileToPublic($aiFile['id'], $baseDir, $aiFile['filename'] ?? null);
+                    if ($savedRel) {
+                        if (str_ends_with(strtolower($savedRel), '.docx')) { $docxPath = $savedRel; }
+                        if (str_ends_with(strtolower($savedRel), '.pdf')) { $pdfPath = $savedRel; }
+                    }
+                }
+                Log::info('AI files saved', ['docx' => $docxPath, 'pdf' => $pdfPath]);
+            }
+
+            // Fallback: if AI didn't provide DOCX, build one from template
+            if (!$docxPath && class_exists('PhpOffice\\PhpWord\\PhpWord')) {
+                Log::info('DOCX generation starting (fallback)');
                 $docxPath = $this->generateDocxFromTemplate(
                     name: $validated['name'],
                     body: $generated,
@@ -130,7 +158,7 @@ class ApplicationController extends Controller
                     email: $validated['email'] ?? '',
                     notes: $validated['notes'] ?? ''
                 );
-                Log::info('DOCX generation finished', ['relative_docx' => $docxPath]);
+                Log::info('DOCX generation finished (fallback)', ['relative_docx' => $docxPath]);
             }
         } catch (\Throwable $e) {
             Log::error('DOCX generation error', ['message' => $e->getMessage()]);
@@ -142,12 +170,14 @@ class ApplicationController extends Controller
             'name' => $validated['name'],
             'notes' => $validated['notes'] ?? null,
             'body' => $generated,
-            'txt_path' => $txtPath ? Storage::disk('public')->path($txtPath) : null,
+            'txt_path' => null,
             'docx_path' => $docxPath ? Storage::disk('public')->path($docxPath) : null,
             'amount_cents' => (int) (config('billing.price_cents') ?? 0),
             'meta' => [
                 'images' => $storedImages,
                 'files' => $storedFiles,
+                // Save relative PDF path if AI produced one
+                'pdf_rel' => $pdfPath ?: null,
             ],
         ]);
 
@@ -157,6 +187,7 @@ class ApplicationController extends Controller
             name: $validated['name'],
             body: $generated,
             docxPath: $absoluteDocx,
+            pdfPath: $pdfPath ? Storage::disk('public')->path($pdfPath) : null,
         );
         try {
             $mailConfig = [
@@ -171,7 +202,7 @@ class ApplicationController extends Controller
             Log::info('Sending email', [
                 'to' => $validated['email'],
                 'has_docx' => (bool) $absoluteDocx,
-                'txt_path' => $txtPath,
+                'has_pdf' => (bool) $pdfPath,
                 'mail_config' => $mailConfig,
             ]);
             Mail::to($validated['email'])->send($mailable);
@@ -212,7 +243,14 @@ Other files uploaded (names only): {$fileList}
 IMPORTANT: Assume the CV/resume uploaded contains the candidate's contact info and experiences. Craft a professional letter that integrates typical contact lines and relevant achievements, even if the raw files are not parsed.
 {$urlBlock}
 
-Return only the letter text suitable for emailing.
+Formatting and output requirements:
+- Use the ATTACHED Word/PDF templates as the visual/structural reference for formatting.
+- Use tools to generate TWO files as outputs of this run: a Word document (.docx) and a PDF (.pdf).
+- Name them clearly (e.g., application.docx and application.pdf).
+- The DOCX and PDF should contain the final polished letter respecting the template’s layout and style.
+- If you need to transform content to match the template, do so via the code interpreter tool.
+
+Return the files as outputs of the run (not inline text); plain text is optional.
 PROMPT;
     }
 
@@ -250,6 +288,160 @@ PROMPT;
     }
 
     /**
+     * Upload absolute file paths to OpenAI Files API (purpose=assistants). Returns array of file_ids.
+     */
+    protected function uploadAbsoluteFilesToOpenAI(array $absolutePaths): array
+    {
+        $apiKey = config('services.openai.key') ?? env('OPENAI_API_KEY') ?? env('OPEN_API_KEY');
+        if (!$apiKey) { return []; }
+
+        $ids = [];
+        foreach ($absolutePaths as $abs) {
+            try {
+                if (!is_file($abs)) { continue; }
+                $name = basename($abs);
+                $response = Http::timeout(60)
+                    ->withToken($apiKey)
+                    ->attach('file', file_get_contents($abs), $name)
+                    ->asMultipart()
+                    ->post('https://api.openai.com/v1/files', [
+                        ['name' => 'purpose', 'contents' => 'assistants'],
+                    ]);
+                if ($response->successful()) {
+                    $data = $response->json();
+                    if (!empty($data['id'])) { $ids[] = $data['id']; }
+                } else {
+                    Log::warning('OpenAI file upload error (abs)', ['name' => $name, 'status' => $response->status(), 'body' => Str::limit($response->body(), 300)]);
+                }
+            } catch (\Throwable $e) {
+                Log::warning('OpenAI file upload exception (abs)', ['file' => $abs, 'message' => $e->getMessage()]);
+            }
+        }
+        return $ids;
+    }
+
+    /**
+     * Fetch AI-generated files (docx/pdf) from the last assistant run steps.
+     * Returns array of ['id' => file_id, 'filename' => string|null]
+     */
+    protected function fetchAssistantOutputFiles(): array
+    {
+        $apiKey = config('services.openai.key') ?? env('OPENAI_API_KEY') ?? env('OPEN_API_KEY');
+        if (!$apiKey || !$this->lastThreadId || !$this->lastRunId) { return []; }
+        try {
+            $stepsRes = Http::timeout(60)
+                ->withToken($apiKey)
+                ->withHeaders(['OpenAI-Beta' => 'assistants=v2'])
+                ->acceptJson()
+                ->get("https://api.openai.com/v1/threads/{$this->lastThreadId}/runs/{$this->lastRunId}/steps", [ 'limit' => 50 ]);
+            if (!$stepsRes->successful()) {
+                Log::warning('OpenAI run steps fetch failed', ['status' => $stepsRes->status(), 'body' => Str::limit($stepsRes->body(), 500)]);
+                return [];
+            }
+            $out = [];
+            $data = $stepsRes->json('data') ?? [];
+            foreach ($data as $step) {
+                $details = $step['step_details'] ?? [];
+                if (($details['type'] ?? '') === 'tool_calls') {
+                    $toolCalls = $details['tool_calls'] ?? [];
+                    foreach ($toolCalls as $tc) {
+                        if (($tc['type'] ?? '') === 'code_interpreter') {
+                            $outputs = $tc['code_interpreter']['outputs'] ?? [];
+                            foreach ($outputs as $o) {
+                                // Look for file outputs
+                                if (($o['type'] ?? '') === 'file_path' && !empty($o['file_id'])) {
+                                    $fid = $o['file_id'];
+                                    $filename = $o['file_path']['filename'] ?? null;
+                                    $out[] = ['id' => $fid, 'filename' => $filename];
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // Fallback: also scan latest assistant message for file attachments
+            if (empty($out)) {
+                $msgList = Http::timeout(30)
+                    ->withToken($apiKey)
+                    ->withHeaders(['OpenAI-Beta' => 'assistants=v2'])
+                    ->acceptJson()
+                    ->get("https://api.openai.com/v1/threads/{$this->lastThreadId}/messages", [ 'limit' => 5, 'order' => 'desc' ]);
+                if ($msgList->successful()) {
+                    $messages = $msgList->json('data') ?? [];
+                    foreach ($messages as $m) {
+                        if (($m['role'] ?? '') !== 'assistant') { continue; }
+                        $content = $m['content'] ?? [];
+                        foreach ($content as $part) {
+                            if (($part['type'] ?? '') === 'file_path' && !empty($part['file_id'])) {
+                                $out[] = ['id' => $part['file_id'], 'filename' => $part['file_path']['filename'] ?? null];
+                            }
+                        }
+                    }
+                }
+            }
+            // Filter only docx/pdf
+            $filtered = [];
+            foreach ($out as $item) {
+                $name = $item['filename'] ?? '';
+                if (!$name) {
+                    $meta = $this->getOpenAIFileMeta($item['id']);
+                    $name = $meta['filename'] ?? '';
+                }
+                $lname = strtolower($name);
+                if (str_ends_with($lname, '.docx') || str_ends_with($lname, '.pdf')) {
+                    $filtered[] = ['id' => $item['id'], 'filename' => $name ?: null];
+                }
+            }
+            return $filtered;
+        } catch (\Throwable $e) {
+            Log::warning('Fetch assistant output files exception', ['message' => $e->getMessage()]);
+            return [];
+        }
+    }
+
+    /** Get file metadata (e.g., filename) from OpenAI Files API */
+    protected function getOpenAIFileMeta(string $fileId): array
+    {
+        $apiKey = config('services.openai.key') ?? env('OPENAI_API_KEY') ?? env('OPEN_API_KEY');
+        if (!$apiKey) { return []; }
+        try {
+            $res = Http::timeout(30)
+                ->withToken($apiKey)
+                ->acceptJson()
+                ->get("https://api.openai.com/v1/files/{$fileId}");
+            if ($res->successful()) { return $res->json() ?: []; }
+        } catch (\Throwable $e) {
+            // ignore
+        }
+        return [];
+    }
+
+    /** Download an OpenAI file by ID and save under public disk baseDir. Returns relative path or null. */
+    protected function downloadOpenAIFileToPublic(string $fileId, string $baseDir, ?string $desiredName = null): ?string
+    {
+        $apiKey = config('services.openai.key') ?? env('OPENAI_API_KEY') ?? env('OPEN_API_KEY');
+        if (!$apiKey) { return null; }
+        try {
+            $meta = $this->getOpenAIFileMeta($fileId);
+            $filename = $desiredName ?: ($meta['filename'] ?? ("openai_{$fileId}"));
+            $contentRes = Http::timeout(120)
+                ->withToken($apiKey)
+                ->withHeaders(['Accept' => 'application/octet-stream'])
+                ->get("https://api.openai.com/v1/files/{$fileId}/content");
+            if (!$contentRes->successful()) {
+                Log::warning('OpenAI file download failed', ['file_id' => $fileId, 'status' => $contentRes->status()]);
+                return null;
+            }
+            $relative = rtrim($baseDir, '/').'/'.$filename;
+            Storage::disk('public')->put($relative, $contentRes->body());
+            return $relative;
+        } catch (\Throwable $e) {
+            Log::warning('OpenAI file download exception', ['file_id' => $fileId, 'message' => $e->getMessage()]);
+            return null;
+        }
+    }
+
+    /**
      * Get OPENAI_ASSISTANT_ID from env or create a minimal assistant (with file_search tool) on the fly.
      */
     protected function getOrCreateAssistantId(): ?string
@@ -266,8 +458,8 @@ PROMPT;
             $payload = [
                 'model' => 'gpt-4o-mini',
                 'name' => 'ShinyAdventure Cover Letter Assistant',
-                'instructions' => 'You help generate concise, personalized job application letters using user prompts and attached files. Use file_search to extract relevant details if needed.',
-                'tools' => [ ['type' => 'file_search'] ],
+                'instructions' => 'You help generate concise, personalized job application letters using user prompts and attached files. Use file_search to extract relevant details and code_interpreter to transform content and produce DOCX/PDF outputs that match the provided templates.',
+                'tools' => [ ['type' => 'file_search'], ['type' => 'code_interpreter'] ],
             ];
             $res = Http::timeout(30)
                 ->withToken($apiKey)
@@ -348,6 +540,7 @@ PROMPT;
                 return null;
             }
             $threadId = $threadRes->json('id');
+            $this->lastThreadId = $threadId;
             Log::info('OpenAI thread created', ['thread_id' => $threadId]);
 
             // 2) Create user message with attachments
@@ -400,6 +593,7 @@ PROMPT;
                 return null;
             }
             $runId = $runRes->json('id');
+            $this->lastRunId = $runId;
             Log::info('OpenAI run started', ['run_id' => $runId]);
 
             // 4) Poll run status
@@ -543,12 +737,18 @@ PROMPT;
 
         $path = null;
         $filename = null;
-        if ($type === 'txt' && $application->txt_path) {
-            $path = $application->txt_path;
-            $filename = 'application.txt';
-        } elseif ($type === 'docx' && $application->docx_path) {
+        if ($type === 'docx' && $application->docx_path) {
             $path = $application->docx_path;
             $filename = 'application.docx';
+        } elseif ($type === 'pdf') {
+            $pdfRel = data_get($application->meta, 'pdf_rel');
+            if ($pdfRel) {
+                $abs = Storage::disk('public')->path($pdfRel);
+                if (is_file($abs)) {
+                    $path = $abs;
+                    $filename = 'application.pdf';
+                }
+            }
         } else {
             abort(404);
         }

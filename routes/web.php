@@ -24,7 +24,7 @@ Route::middleware(['auth'])->group(function () {
     Route::post('/generate', [ApplicationController::class, 'store'])->name('application.generate');
     Route::get('/applications', [ApplicationController::class, 'index'])->name('applications.index');
     Route::get('/applications/{application}/{type}', [ApplicationController::class, 'download'])
-        ->whereIn('type', ['txt', 'docx'])
+        ->whereIn('type', ['docx', 'pdf'])
         ->name('applications.download');
 });
 
