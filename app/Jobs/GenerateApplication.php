@@ -68,20 +68,17 @@ class GenerateApplication implements ShouldQueue
             'prompt_chars' => strlen($prompt),
         ]);
 
-        // Upload files
+        // Upload only user-provided files (resume + job image). Do not upload templates.
         $fileIds = [];
         try {
             $fileIds = array_merge(
                 $this->uploadRelativeFilesToOpenAI($storedFiles),
                 $this->uploadRelativeFilesToOpenAI($storedImages)
             );
-            $tplIds = $this->getCachedTemplateFileIds();
-            if (!empty($tplIds)) { $fileIds = array_merge($fileIds, $tplIds); }
             Log::info('GenerateApplication: OpenAI files uploaded', ['count' => count($fileIds)]);
             $this->dlog('Uploaded files to OpenAI', [
                 'files_count' => count($storedFiles),
                 'images_count' => count($storedImages),
-                'template_ids' => $tplIds,
                 'all_file_ids' => $fileIds,
             ]);
         } catch (\Throwable $e) {
@@ -99,45 +96,20 @@ class GenerateApplication implements ShouldQueue
             Log::warning('GenerateApplication: Assistant returned no text, using fallback');
             $resultText = $this->fallbackLetter($name, $notes);
         }
+        // Ensure we have valid HTML (assistant may return plain text)
+        $resultText = $this->ensureHtml($resultText, $name);
 
-        // Save outputs
+        // HTML-only mode: skip fetching/creating DOCX/PDF artifacts.
         $timestamp = now()->format('Ymd_His');
         $safeSlug = Str::slug($name) ?: 'application';
         $baseDir = "generated/{$safeSlug}_{$timestamp}";
-
-        $docxPath = null; // relative on public disk
-        $pdfPath = null;  // relative on public disk
-
-        try {
-            $aiFiles = $this->fetchAssistantOutputFiles();
-            if (!empty($aiFiles)) {
-                $this->dlog('Assistant output files discovered', ['files' => $aiFiles]);
-                // store ids for later cleanup
-                $this->updateMeta($application, ['openai.file_ids' => array_values(array_unique(array_map(fn($f) => $f['id'], $aiFiles)))]);
-                foreach ($aiFiles as $aiFile) {
-                    $savedRel = $this->downloadOpenAIFileToPublic($aiFile['id'], $baseDir, $aiFile['filename'] ?? null);
-                    if ($savedRel) {
-                        if (str_ends_with(strtolower($savedRel), '.docx')) { $docxPath = $savedRel; }
-                        if (str_ends_with(strtolower($savedRel), '.pdf')) { $pdfPath = $savedRel; }
-                        $this->dlog('Downloaded OpenAI file', ['file_id' => $aiFile['id'], 'saved_rel' => $savedRel]);
-                    }
-                }
-                Log::info('GenerateApplication: AI files saved', ['docx' => $docxPath, 'pdf' => $pdfPath]);
-            }
-
-            // Fallback DOCX if AI didn't provide one
-            if (!$docxPath && class_exists('PhpOffice\\PhpWord\\PhpWord')) {
-                $docxPath = $this->generateDocxFallback($name, $email, $notes, $resultText, $baseDir, $timestamp);
-                Log::info('GenerateApplication: DOCX fallback created', ['docx' => $docxPath]);
-            }
-        } catch (\Throwable $e) {
-            Log::error('GenerateApplication: error saving AI files', ['message' => $e->getMessage()]);
-        }
+        $docxPath = null;
+        $pdfPath = null;
 
         // Update application
-        $application->body = $resultText;
-        $application->docx_path = $docxPath ? Storage::disk('public')->path($docxPath) : null;
-        $this->updateMeta($application, [ 'pdf_rel' => $pdfPath ?: null, 'status' => 'ready' ]);
+        $application->body = $resultText; // HTML content expected
+        $application->docx_path = null; // no docx in HTML-only mode
+        $this->updateMeta($application, [ 'pdf_rel' => null, 'status' => 'ready' ]);
         $application->save();
 
         // Email
@@ -145,16 +117,16 @@ class GenerateApplication implements ShouldQueue
             $mailable = new GeneratedApplication(
                 name: $name,
                 body: $resultText,
-                docxPath: $application->docx_path ?: null,
-                pdfPath: $pdfPath ? Storage::disk('public')->path($pdfPath) : null,
+                docxPath: null,
+                pdfPath: null,
             );
-            $this->dlog('Prepared email', [
+            $this->dlog('Prepared email (HTML-only)', [
                 'to' => $email,
-                'has_docx' => (bool) $application->docx_path,
-                'has_pdf' => (bool) $pdfPath,
+                'has_docx' => false,
+                'has_pdf' => false,
             ]);
             Mail::to($email)->send($mailable);
-            Log::info('GenerateApplication: Email sent from job', ['app_id' => $application->id]);
+            Log::info('GenerateApplication: Email sent from job (HTML-only)', ['app_id' => $application->id]);
         } catch (\Throwable $e) {
             Log::error('GenerateApplication: Mail send failed', ['message' => $e->getMessage()]);
         }
@@ -193,33 +165,27 @@ class GenerateApplication implements ShouldQueue
         }
 
         return <<<PROMPT
-You are an expert career assistant. Draft a concise, personalized job application/cover letter.
+You are an expert career assistant. Generate a concise, personalized COVER LETTER as COMPLETE, SELF-CONTAINED HTML only.
 
-Requirements:
-- Professional tone, friendly and confident.
-- 3–6 short paragraphs, use clear headings if beneficial.
-- Tailor to the candidate and notes provided.
-- End with a compelling closing and contact lines.
+Content requirements:
+- Professional, friendly, confident tone.
+- 3–6 short paragraphs; tailored to the candidate and job context from the uploaded RESUME and JOB IMAGE.
+- Use real details extracted from the attachments (employer/company, role, technologies, achievements) when available.
+- Do NOT invent placeholders like [Company Name] or meta instructions. If specific details are not present, omit that line gracefully.
+- End with a strong closing and contact lines.
 
-Candidate name: {$name}
-Additional notes/context from user: "{$notes}"
-Number of images uploaded: {$imageCount}
-Other files uploaded (names only): {$fileList}
-
-IMPORTANT: Assume the CV/resume uploaded contains the candidate's contact info and experiences. Craft a professional letter that integrates typical contact lines and relevant achievements, even if the raw files are not parsed.
+Inputs:
+- Candidate name: {$name}
+- Notes from user: "{$notes}"
+- Uploaded files (names only): {$fileList}
+- Number of uploaded images (job screenshot): {$imageCount}
 {$urlBlock}
 
-Formatting and output requirements:
-- Use the ATTACHED Word/PDF templates as the visual/structural reference for formatting.
-- Use tools to generate TWO files as outputs of this run: a Word document (.docx) and a PDF (.pdf).
-- Name them clearly (e.g., application.docx and application.pdf).
-- The DOCX and PDF should contain the final polished letter respecting the template’s layout and style.
-- If you need to transform content to match the template, do so via the code interpreter tool.
-
-Return the files as outputs of the run (not inline text) when possible.
-
-IMPORTANT FALLBACK:
-If you cannot produce the DOCX/PDF files for any reason, return the complete letter as VALID, SELF-CONTAINED HTML that mimics the provided template’s look using inline CSS only. Include headings, spacing, and typographic choices similar to the template. Do not include external assets. The HTML should be production-ready to render directly in a web page and to convert to PDF as-is.
+Formatting and output:
+- Return ONLY valid HTML, with inline CSS styles suitable for direct display and PDF conversion.
+- Include a simple header with candidate contact info (infer from resume if present), body paragraphs, and a polite closing/signature.
+- Avoid Markdown, code fences, or explanatory text. Output the HTML document string only, no backticks.
+- Keep layout clean: readable fonts, proper spacing, bold for headers, and consistent line-height.
 PROMPT;
     }
 
@@ -233,9 +199,9 @@ PROMPT;
         try {
             $payload = [
                 'model' => 'gpt-4o-mini',
-                'name' => 'ShinyAdventure Cover Letter Assistant',
-                'instructions' => 'You help generate concise, personalized job application letters using user prompts and attached files. Use file_search to extract relevant details and code_interpreter to transform content and produce DOCX/PDF outputs that match the provided templates.',
-                'tools' => [ ['type' => 'file_search'], ['type' => 'code_interpreter'] ],
+                'name' => 'ShinyAdventure HTML Cover Letter Assistant',
+                'instructions' => 'You generate concise, personalized job application letters as self-contained HTML using details from user inputs and uploaded files/images. Use file_search to extract factual data (employer, role, technologies, achievements) from the resume and job screenshot. Return only valid HTML with inline CSS. Do not include placeholders or meta commentary.',
+                'tools' => [ ['type' => 'file_search'] ],
             ];
             $this->dlog('Creating assistant', ['payload' => $payload]);
             $res = Http::timeout(30)->retry(3, 1000)
@@ -506,6 +472,36 @@ PROMPT;
         $notesLine = $notes ? "\n\nAdditional context: {$notes}" : '';
         return "Dear Hiring Team,\n\nMy name is {$name}. I am excited to express my interest in opportunities that align with my background. I bring a track record of delivering results, collaborating across teams, and continuously improving processes to create impact.".
             "\n\nI would welcome the chance to contribute, learn, and grow while supporting your goals. Please find my details attached or available upon request.\n{$notesLine}\n\nKind regards,\n{$name}";
+    }
+
+    protected function ensureHtml(string $content, string $name): string
+    {
+        $trim = trim($content);
+        $looksHtml = str_contains($trim, '<') && str_contains($trim, '>');
+        if ($looksHtml) { return $content; }
+        $escaped = e($trim);
+        return <<<HTML
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    body { font-family: Arial, sans-serif; color:#111; line-height:1.5; font-size:14px; }
+    h1 { font-size:20px; margin:0 0 6px; }
+    .muted { color:#666; font-size:12px; }
+    p { margin:0 0 10px; }
+  </style>
+  <title>Application - {$name}</title>
+  </head>
+<body>
+  <h1>Application Letter</h1>
+  <div class="muted">Generated</div>
+  <div>
+    <p>{$escaped}</p>
+  </div>
+</body>
+</html>
+HTML;
     }
 
     protected function dlog(string $message, array $context = []): void

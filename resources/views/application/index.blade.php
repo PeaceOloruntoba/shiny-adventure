@@ -52,16 +52,10 @@
                                     @php($status = data_get($app->meta, 'status'))
                                     @php($canDownload = $status === 'ready')
                                     <a class="px-3 py-1.5 text-sm rounded-md border hover:bg-gray-50" href="{{ route('applications.preview', $app) }}">Preview</a>
-                                    @if($canDownload && $app->docx_path)
-                                        <a class="px-3 py-1.5 text-sm rounded-md border hover:bg-gray-50" href="{{ route('applications.download', [$app, 'docx']) }}">DOCX</a>
+                                    @if($canDownload)
+                                        <a class="px-3 py-1.5 text-sm rounded-md border hover:bg-gray-50" href="{{ route('applications.pdf', $app) }}">Download PDF</a>
                                     @else
-                                        <button class="px-3 py-1.5 text-sm rounded-md border text-gray-400 cursor-not-allowed" disabled>DOCX</button>
-                                    @endif
-                                    @php($pdfRel = data_get($app->meta, 'pdf_rel'))
-                                    @if($canDownload && $pdfRel)
-                                        <a class="px-3 py-1.5 text-sm rounded-md border hover:bg-gray-50" href="{{ route('applications.download', [$app, 'pdf']) }}">PDF</a>
-                                    @else
-                                        <button class="px-3 py-1.5 text-sm rounded-md border text-gray-400 cursor-not-allowed" disabled>PDF</button>
+                                        <button class="px-3 py-1.5 text-sm rounded-md border text-gray-400 cursor-not-allowed" disabled>Download PDF</button>
                                     @endif
                                     <form action="{{ route('applications.destroy', $app) }}" method="POST" onsubmit="return confirm('Delete this application?');">
                                         @csrf
