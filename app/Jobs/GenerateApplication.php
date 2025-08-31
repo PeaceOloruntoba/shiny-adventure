@@ -184,6 +184,7 @@ Inputs:
 Formatting and output:
 - Return ONLY valid HTML, with inline CSS styles suitable for direct display and PDF conversion.
 - Avoid Markdown, code fences, or explanatory text. Output the HTML document string only, no backticks.
+- Use the provided TEMPLATE_HTML below as the base. Fill placeholders when you have the data; if you do NOT have the data, LEAVE THE PLACEHOLDER AS-IS (do not delete). Keep structure/css intact.
 - Match the following A4 PAGE LAYOUT with HEADER BACKGROUND and SIGNATURE SPACE:
 
 STRUCTURE (top-to-bottom):
@@ -208,6 +209,54 @@ IMPORTANT:
 - Use only inline CSS, no external stylesheets.
 - Do not include placeholder tokens or meta commentary.
 - Ensure the final output is a single, valid HTML document that renders correctly as an A4 PDF.
+
+TEMPLATE_HTML (fill what you can; leave unknown placeholders unchanged):
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    @page { size: A4; margin: 20mm; }
+    html, body { height: 100%; }
+    body { margin: 0; font-family: Arial, sans-serif; font-size: 14px; color: #111; line-height: 1.55; }
+    .page { width: 170mm; min-height: 257mm; margin: 0 auto; }
+    .header { height: 40mm; border-radius: 6px; background: linear-gradient(135deg,#1f2937 0%,#111827 60%,#0b1220 100%); position: relative; margin-bottom: 10mm; }
+    .header-inner { position:absolute; inset: 0; padding: 10mm; color: #fff; }
+    .header-title { font-size: 16px; font-weight: 700; margin: 0; }
+    .header-sub { font-size: 12px; opacity: .9; margin-top: 2mm; }
+    .meta { color:#555; font-size:11px; margin-bottom: 4mm; }
+    .subject { font-weight:700; font-size:16px; margin:0 0 12px 0; }
+    .content p { margin: 0 0 10px; }
+    .signature { margin-top: 10mm; padding-top: 6mm; border-top: 1px solid #e5e7eb; }
+    .signature-space { height: 18mm; display:block; }
+  </style>
+  <title>Cover Letter — {{CANDIDATE_NAME}}</title>
+  </head>
+<body>
+  <div class="page">
+    <div class="header">
+      <div class="header-inner">
+        <h1 class="header-title">{{CANDIDATE_NAME}}</h1>
+        <div class="header-sub">{{DATE}}</div>
+      </div>
+    </div>
+
+    <div class="meta">{{CONTACT_BLOCK}}</div>
+
+    <div class="content">
+      <div>{{RECIPIENT_BLOCK}}</div>
+      <div class="subject">{{SUBJECT_LINE}}</div>
+      {{BODY_HTML}}
+    </div>
+
+    <div class="signature">
+      <span class="signature-space"></span>
+      <div><strong>{{CANDIDATE_NAME}}</strong></div>
+      <div>{{CONTACT_LINES}}</div>
+    </div>
+  </div>
+</body>
+</html>
 PROMPT;
     }
 
