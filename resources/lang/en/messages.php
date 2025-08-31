@@ -19,8 +19,9 @@ return [
     'footer_note' => 'This is a minimal demo. Authentication, billing, admin dashboard, and history will be added next.',
 
     'sent_success' => 'Your application was generated and sent (or logged if mail is not configured). Please check your inbox.',
+    'generation_started' => 'We started generating your application. You will receive an email when it is ready.',
 
     'email_subject' => 'Your Generated Job Application',
     'email_intro' => 'Hi :name, here is your generated application:',
-    'email_outro' => 'Attached is a .txt copy for your records. You can reply to this email with feedback to improve future drafts.',
+    'email_outro' => 'DOCX and PDF are attached when available. You can reply to this email with feedback to improve future drafts.',
 ];

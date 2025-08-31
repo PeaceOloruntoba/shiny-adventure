@@ -19,8 +19,9 @@ return [
     'footer_note' => 'Dies ist eine minimale Demo. Anmeldung, Abrechnung, Admin-Dashboard und Verlauf folgen als Nächstes.',
 
     'sent_success' => 'Ihre Bewerbung wurde generiert und gesendet (oder protokolliert, falls E-Mail nicht konfiguriert ist). Bitte prüfen Sie Ihr Postfach.',
+    'generation_started' => 'Wir haben mit der Generierung Ihrer Bewerbung begonnen. Sie erhalten eine E-Mail, sobald sie fertig ist.',
 
     'email_subject' => 'Ihre generierte Bewerbung',
     'email_intro' => 'Hallo :name, hier ist Ihre generierte Bewerbung:',
-    'email_outro' => 'Eine .txt-Kopie ist angehängt. Antworten Sie gern mit Feedback zur Verbesserung zukünftiger Entwürfe.',
+    'email_outro' => 'DOCX und PDF sind, wenn verfügbar, angehängt. Antworten Sie gern mit Feedback zur Verbesserung zukünftiger Entwürfe.',
 ];

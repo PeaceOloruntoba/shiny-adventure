@@ -35,17 +35,39 @@
                         @forelse($applications as $app)
                             <div class="p-4 flex items-center justify-between gap-4">
                                 <div class="min-w-0">
-                                    <div class="font-semibold truncate">{{ $app->name }} <span class="text-gray-500">&lt;{{ $app->email }}&gt;</span></div>
+                                    <div class="font-semibold truncate flex items-center gap-2">
+                                        <span>{{ $app->name }} <span class="text-gray-500">&lt;{{ $app->email }}&gt;</span></span>
+                                        @php($status = data_get($app->meta, 'status', 'ready'))
+                                        @if($status === 'processing')
+                                            <span class="px-2 py-0.5 text-xs rounded-full bg-amber-100 text-amber-800">Processing…</span>
+                                        @elseif($status === 'failed')
+                                            <span class="px-2 py-0.5 text-xs rounded-full bg-rose-100 text-rose-800">Failed</span>
+                                        @else
+                                            <span class="px-2 py-0.5 text-xs rounded-full bg-emerald-100 text-emerald-800">Ready</span>
+                                        @endif
+                                    </div>
                                     <div class="text-xs text-gray-500">{{ $app->created_at->toDayDateTimeString() }}</div>
                                 </div>
                                 <div class="flex items-center gap-2 shrink-0">
-                                    @if($app->docx_path)
+                                    @php($status = data_get($app->meta, 'status'))
+                                    @php($canDownload = $status === 'ready')
+                                    <a class="px-3 py-1.5 text-sm rounded-md border hover:bg-gray-50" href="{{ route('applications.preview', $app) }}">Preview</a>
+                                    @if($canDownload && $app->docx_path)
                                         <a class="px-3 py-1.5 text-sm rounded-md border hover:bg-gray-50" href="{{ route('applications.download', [$app, 'docx']) }}">DOCX</a>
+                                    @else
+                                        <button class="px-3 py-1.5 text-sm rounded-md border text-gray-400 cursor-not-allowed" disabled>DOCX</button>
                                     @endif
                                     @php($pdfRel = data_get($app->meta, 'pdf_rel'))
-                                    @if($pdfRel)
+                                    @if($canDownload && $pdfRel)
                                         <a class="px-3 py-1.5 text-sm rounded-md border hover:bg-gray-50" href="{{ route('applications.download', [$app, 'pdf']) }}">PDF</a>
+                                    @else
+                                        <button class="px-3 py-1.5 text-sm rounded-md border text-gray-400 cursor-not-allowed" disabled>PDF</button>
                                     @endif
+                                    <form action="{{ route('applications.destroy', $app) }}" method="POST" onsubmit="return confirm('Delete this application?');">
+                                        @csrf
+                                        @method('DELETE')
+                                        <button class="px-3 py-1.5 text-sm rounded-md border text-rose-700 hover:bg-rose-50">Delete</button>
+                                    </form>
                                 </div>
                             </div>
                         @empty

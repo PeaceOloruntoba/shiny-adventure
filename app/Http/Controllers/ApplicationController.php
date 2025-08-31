@@ -8,9 +8,13 @@ use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Str;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Cache;
 use App\Mail\GeneratedApplication;
 use App\Models\Application;
 use Illuminate\Support\Facades\Auth;
+use App\Jobs\GenerateApplication;
+use Dompdf\Dompdf;
+use Dompdf\Options;
 
 class ApplicationController extends Controller
 {
@@ -20,6 +24,33 @@ class ApplicationController extends Controller
     public function create()
     {
         return view('application.form');
+    }
+
+    /**
+     * Return cached OpenAI File IDs for our DOCX/PDF templates. Upload if cache miss or files changed.
+     */
+    protected function getCachedTemplateFileIds(): array
+    {
+        $apiKey = config('services.openai.key') ?? env('OPENAI_API_KEY') ?? env('OPEN_API_KEY');
+        if (!$apiKey) { return []; }
+
+        $docxTpl = base_path('doc/Vorlage Zander Rohan.docx');
+        $pdfTpl  = base_path('doc/Vorlage Zander Rohan.pdf');
+        $existing = array_values(array_filter([$docxTpl, $pdfTpl], fn($p) => is_file($p)));
+        if (empty($existing)) { return []; }
+
+        $finger = [];
+        foreach ($existing as $p) {
+            $finger[] = basename($p) . '|' . filesize($p) . '|' . filemtime($p);
+        }
+        $key = 'openai_template_file_ids_' . sha1(implode(';', $finger));
+
+        return Cache::remember($key, now()->addHours(6), function () use ($existing) {
+            Log::info('Uploading templates to OpenAI (cache miss)');
+            $ids = $this->uploadAbsoluteFilesToOpenAI($existing);
+            Log::info('Template upload complete', ['count' => count($ids)]);
+            return $ids;
+        });
     }
 
     public function store(Request $request)
@@ -85,134 +116,33 @@ class ApplicationController extends Controller
             'image_urls' => $imageUrls,
         ]);
 
-        // Upload user files to OpenAI and call Responses API with attachments
-        Log::info('OpenAI request starting', [
-            'model' => 'gpt-4o-mini',
-            'prompt_chars' => strlen($prompt),
-        ]);
-
-        $fileIds = [];
-        try {
-            // 1) Upload user files from public storage
-            $fileIds = $this->uploadFilesToOpenAI(array_merge($storedFiles, $storedImages));
-            // 2) Upload our DOCX/PDF templates each request for best fidelity
-            $templateAbs = [];
-            $docxTpl = base_path('doc/Vorlage Zander Rohan.docx');
-            $pdfTpl  = base_path('doc/Vorlage Zander Rohan.pdf');
-            if (is_file($docxTpl)) { $templateAbs[] = $docxTpl; }
-            if (is_file($pdfTpl)) { $templateAbs[] = $pdfTpl; }
-            if (!empty($templateAbs)) {
-                $tplIds = $this->uploadAbsoluteFilesToOpenAI($templateAbs);
-                $fileIds = array_merge($fileIds, $tplIds);
-            }
-            Log::info('OpenAI files uploaded', ['count' => count($fileIds)]);
-        } catch (\Throwable $e) {
-            Log::warning('OpenAI file upload failed; continuing without files', ['message' => $e->getMessage()]);
-        }
-
-        $generated = $this->generateWithAssistant($prompt, $fileIds);
-
-        // Fallback if OpenAI fails
-        if (!$generated) {
-            Log::warning('OpenAI generation failed; using fallback letter');
-            $generated = $this->fallbackLetter($validated['name'], $validated['notes'] ?? '');
-        }
-        Log::info('OpenAI response received', [
-            'response_preview' => Str::limit($generated, 200),
-            'response_chars' => strlen($generated),
-        ]);
-
-        // Persist record and write files
-        $timestamp = now()->format('Ymd_His');
-        $safeSlug = Str::slug($validated['name']) ?: 'application';
-        $baseDir = "generated/{$safeSlug}_{$timestamp}";
-        // No TXT anymore – AI will produce DOCX/PDF. We'll still keep fallback DOCX if needed.
-
-        // Try to generate DOCX using PHPWord if available
-        $docxPath = null;
-        $pdfPath = null;
-        try {
-            // Attempt to fetch AI-generated files from the Assistants run (docx/pdf)
-            $aiFiles = $this->fetchAssistantOutputFiles();
-            // Save files if present
-            if (!empty($aiFiles)) {
-                foreach ($aiFiles as $aiFile) {
-                    // Download content
-                    $savedRel = $this->downloadOpenAIFileToPublic($aiFile['id'], $baseDir, $aiFile['filename'] ?? null);
-                    if ($savedRel) {
-                        if (str_ends_with(strtolower($savedRel), '.docx')) { $docxPath = $savedRel; }
-                        if (str_ends_with(strtolower($savedRel), '.pdf')) { $pdfPath = $savedRel; }
-                    }
-                }
-                Log::info('AI files saved', ['docx' => $docxPath, 'pdf' => $pdfPath]);
-            }
-
-            // Fallback: if AI didn't provide DOCX, build one from template
-            if (!$docxPath && class_exists('PhpOffice\\PhpWord\\PhpWord')) {
-                Log::info('DOCX generation starting (fallback)');
-                $docxPath = $this->generateDocxFromTemplate(
-                    name: $validated['name'],
-                    body: $generated,
-                    baseDir: $baseDir,
-                    timestamp: $timestamp,
-                    email: $validated['email'] ?? '',
-                    notes: $validated['notes'] ?? ''
-                );
-                Log::info('DOCX generation finished (fallback)', ['relative_docx' => $docxPath]);
-            }
-        } catch (\Throwable $e) {
-            Log::error('DOCX generation error', ['message' => $e->getMessage()]);
-        }
-
+        // Create application record in processing state; generation handled by queued job
         $application = Application::create([
             'user_id' => $user?->id,
             'email' => $validated['email'],
             'name' => $validated['name'],
             'notes' => $validated['notes'] ?? null,
-            'body' => $generated,
+            'body' => '',
             'txt_path' => null,
-            'docx_path' => $docxPath ? Storage::disk('public')->path($docxPath) : null,
+            'docx_path' => null,
             'amount_cents' => (int) (config('billing.price_cents') ?? 0),
             'meta' => [
                 'images' => $storedImages,
                 'files' => $storedFiles,
-                // Save relative PDF path if AI produced one
-                'pdf_rel' => $pdfPath ?: null,
+                'pdf_rel' => null,
+                'status' => 'processing',
             ],
         ]);
 
-        // Email the generated content with attachments immediately (Brevo SMTP configured in .env)
-        $absoluteDocx = $application->docx_path ?: null;
-        $mailable = new GeneratedApplication(
-            name: $validated['name'],
-            body: $generated,
-            docxPath: $absoluteDocx,
-            pdfPath: $pdfPath ? Storage::disk('public')->path($pdfPath) : null,
-        );
+        // Process immediately (no queue). Keep status logic in place; UI will reflect updates.
         try {
-            $mailConfig = [
-                'MAIL_MAILER' => env('MAIL_MAILER'),
-                'MAIL_HOST' => env('MAIL_HOST'),
-                'MAIL_PORT' => env('MAIL_PORT'),
-                'MAIL_ENCRYPTION' => env('MAIL_ENCRYPTION'),
-                'MAIL_FROM_ADDRESS' => env('MAIL_FROM_ADDRESS'),
-                'MAIL_FROM_NAME' => env('MAIL_FROM_NAME'),
-                'queue' => (bool) env('MAIL_QUEUE', false),
-            ];
-            Log::info('Sending email', [
-                'to' => $validated['email'],
-                'has_docx' => (bool) $absoluteDocx,
-                'has_pdf' => (bool) $pdfPath,
-                'mail_config' => $mailConfig,
-            ]);
-            Mail::to($validated['email'])->send($mailable);
-            Log::info('Email sent');
+            (new GenerateApplication($application->id))->handle();
+            Log::info('GenerateApplication processed synchronously', ['application_id' => $application->id]);
         } catch (\Throwable $e) {
-            // log and continue to UI
-            Log::error('Mail send failed', ['message' => $e->getMessage()]);
+            Log::error('Synchronous generation error', ['application_id' => $application->id, 'message' => $e->getMessage()]);
         }
 
-        return to_route('applications.index')->with('status', __('messages.sent_success'));
+        return to_route('applications.index');
     }
 
     protected function buildPrompt(string $name, string $notes, int $imageCount, array $fileNames, array $fileUrls = [], array $imageUrls = []): string
@@ -596,8 +526,9 @@ PROMPT;
             $this->lastRunId = $runId;
             Log::info('OpenAI run started', ['run_id' => $runId]);
 
-            // 4) Poll run status
-            $deadline = now()->addSeconds(60);
+            // 4) Poll run status (shorter window for UX); fallback if not done
+            $deadline = now()->addSeconds(45);
+            $startedAt = microtime(true);
             while (now()->lt($deadline)) {
                 usleep(500000); // 0.5s
                 $getRun = Http::timeout(30)
@@ -611,12 +542,16 @@ PROMPT;
                 }
                 $status = $getRun->json('status');
                 if (in_array($status, ['completed', 'failed', 'cancelled', 'expired'])) {
-                    Log::info('OpenAI run finished', ['status' => $status]);
+                    Log::info('OpenAI run finished', ['status' => $status, 'elapsed_s' => round(microtime(true) - $startedAt, 2)]);
                     if ($status !== 'completed') {
                         return null;
                     }
                     break;
                 }
+            }
+            if (now()->gte($deadline)) {
+                Log::warning('OpenAI run timeout; proceeding with fallback', ['elapsed_s' => round(microtime(true) - $startedAt, 2)]);
+                return null;
             }
 
             // 5) Retrieve latest message(s)
@@ -754,5 +689,80 @@ PROMPT;
         }
 
         return response()->download($path, $filename);
+    }
+
+    public function preview(Application $application)
+    {
+        $this->authorize('view', $application);
+        $name = $application->name;
+        $date = now()->format('Y-m-d');
+        $body = $application->body ?: '<p>No content available.</p>';
+        return view('application.preview', compact('name', 'date', 'body', 'application'));
+    }
+
+    public function pdf(Application $application)
+    {
+        $this->authorize('view', $application);
+        // Render current HTML body to PDF on-the-fly for download
+        $html = view('application.pdf', [
+            'name' => $application->name,
+            'date' => now()->format('Y-m-d'),
+            'body' => $application->body,
+        ])->render();
+
+        $options = new Options();
+        $options->set('isRemoteEnabled', false);
+        $options->set('isHtml5ParserEnabled', true);
+        $dompdf = new Dompdf($options);
+        $dompdf->loadHtml($html);
+        $dompdf->setPaper('A4');
+        $dompdf->render();
+        return response($dompdf->output(), 200, [
+            'Content-Type' => 'application/pdf',
+            'Content-Disposition' => 'attachment; filename="application.pdf"',
+        ]);
+    }
+
+    public function destroy(Application $application)
+    {
+        $this->authorize('delete', $application);
+
+        // Attempt OpenAI cleanup if metadata available
+        try {
+            $apiKey = config('services.openai.key') ?? env('OPENAI_API_KEY') ?? env('OPEN_API_KEY');
+            $threadId = data_get($application->meta, 'openai.thread_id');
+            $fileIds = (array) data_get($application->meta, 'openai.file_ids', []);
+            if ($apiKey && $threadId) {
+                Http::timeout(15)
+                    ->withToken($apiKey)
+                    ->withHeaders(['OpenAI-Beta' => 'assistants=v2'])
+                    ->delete("https://api.openai.com/v1/threads/{$threadId}");
+            }
+            if ($apiKey && !empty($fileIds)) {
+                foreach ($fileIds as $fid) {
+                    Http::timeout(15)
+                        ->withToken($apiKey)
+                        ->delete("https://api.openai.com/v1/files/{$fid}");
+                }
+            }
+        } catch (\Throwable $e) {
+            Log::warning('OpenAI cleanup on delete failed', ['id' => $application->id, 'message' => $e->getMessage()]);
+        }
+
+        // Delete stored files
+        try {
+            $pdfRel = data_get($application->meta, 'pdf_rel');
+            if ($pdfRel) {
+                Storage::disk('public')->delete($pdfRel);
+            }
+            if ($application->docx_path && is_file($application->docx_path)) {
+                @unlink($application->docx_path);
+            }
+        } catch (\Throwable $e) {
+            // ignore
+        }
+
+        $application->delete();
+        return to_route('applications.index')->with('status', 'Application deleted');
     }
 }
