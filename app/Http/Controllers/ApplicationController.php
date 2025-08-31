@@ -717,7 +717,8 @@ PROMPT;
         }
 
         $options = new Options();
-        $options->set('isRemoteEnabled', false);
+        // Allow remote assets (e.g., header background images) when rendering PDFs
+        $options->set('isRemoteEnabled', true);
         $options->set('isHtml5ParserEnabled', true);
         $dompdf = new Dompdf($options);
         $dompdf->loadHtml($html);

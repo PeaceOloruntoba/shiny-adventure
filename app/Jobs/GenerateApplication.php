@@ -184,25 +184,30 @@ Inputs:
 Formatting and output:
 - Return ONLY valid HTML, with inline CSS styles suitable for direct display and PDF conversion.
 - Avoid Markdown, code fences, or explanatory text. Output the HTML document string only, no backticks.
-- Use the following STRUCTURE and CSS skeleton for a professional template look:
+- Match the following A4 PAGE LAYOUT with HEADER BACKGROUND and SIGNATURE SPACE:
 
-STRUCTURE:
-- Top contact block (candidate details inferred from resume if present)
+STRUCTURE (top-to-bottom):
+- Header banner with background (use a dark gradient by default, or an image if explicitly provided): height ~40mm, contains candidate name and date in white text.
+- Contact block
 - Date
-- Recipient block (company/employer inferred from job image if present)
+- Recipient block
 - Subject line in bold (e.g., Application for <Role>)
 - Body paragraphs (concise, tailored)
-- Signature with candidate name and contact lines
+- Signature area: printed-sign whitespace then sender name and contact lines
 
-CSS SKELETON (use inline styles with similar values):
-- Body: font-family: Arial, sans-serif; color:#111; line-height:1.6; font-size:14px; margin:0; padding:24px;
-- Contact block: font-size:12px; color:#555; margin-bottom:16px;
-- Date/recipient: margin: 0 0 12px 0;
-- Subject: font-weight:bold; font-size:16px; margin: 0 0 12px 0;
+BASELINE CSS (inline styles with similar values):
+- @page size A4; margins ~20mm. Outer container width ~170mm.
+- Body: font-family: Arial, sans-serif; color:#111; line-height:1.55; font-size:14px; margin:0;
+- Header: height:40mm; border-radius:6px; background: linear-gradient(135deg,#1f2937 0%,#111827 60%,#0b1220 100%); color:#fff; padding:10mm;
+- Subject: font-weight:700; font-size:16px; margin:0 0 12px 0;
 - Paragraphs: margin:0 0 10px 0;
-- Signature: margin-top:18px; font-weight:500;
+- Signature block: margin-top:10mm; padding-top:6mm; border-top:1px solid #e5e7eb;
+- Signature whitespace: height:18mm; display:block;
 
-Ensure the final output is a single, valid HTML document with inline CSS only.
+IMPORTANT:
+- Use only inline CSS, no external stylesheets.
+- Do not include placeholder tokens or meta commentary.
+- Ensure the final output is a single, valid HTML document that renders correctly as an A4 PDF.
 PROMPT;
     }
 
