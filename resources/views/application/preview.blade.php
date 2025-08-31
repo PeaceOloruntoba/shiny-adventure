@@ -15,6 +15,7 @@
         .doc { background: #fff; border: 1px solid #e5e7eb; border-radius: 12px; padding: 24px; }
         .muted { color: #6b7280; font-size: 12px; margin-bottom: 8px; }
         .doc .content p { margin: 0 0 10px; line-height: 1.6; }
+        .frame { width: 100%; height: 80vh; border: 1px solid #e5e7eb; border-radius: 12px; }
         @media (prefers-color-scheme: dark) { body { background:#0b0f19; color:#e5e7eb } .doc{ background:#0f172a; border-color:#1f2937 } .btn{ border-color:#334155; color:#e5e7eb } .btn:hover{ background:#111827 } .btn.primary{ background:#2563eb; border-color:#2563eb } }
     </style>
 </head>
@@ -30,12 +31,17 @@
         </div>
     </div>
     <div class="wrap">
-        <div class="doc">
-            <div class="muted">{{ now()->format('Y-m-d') }}</div>
-            <div class="content">
-                {!! $body !!}
+        @php($isFullHtml = stripos($body, '<html') !== false)
+        @if($isFullHtml)
+            <iframe class="frame" srcdoc="{!! htmlspecialchars($body, ENT_QUOTES) !!}"></iframe>
+        @else
+            <div class="doc">
+                <div class="muted">{{ now()->format('Y-m-d') }}</div>
+                <div class="content">
+                    {!! $body !!}
+                </div>
             </div>
-        </div>
+        @endif
     </div>
 </body>
 </html>

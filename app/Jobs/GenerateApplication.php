@@ -183,9 +183,26 @@ Inputs:
 
 Formatting and output:
 - Return ONLY valid HTML, with inline CSS styles suitable for direct display and PDF conversion.
-- Include a simple header with candidate contact info (infer from resume if present), body paragraphs, and a polite closing/signature.
 - Avoid Markdown, code fences, or explanatory text. Output the HTML document string only, no backticks.
-- Keep layout clean: readable fonts, proper spacing, bold for headers, and consistent line-height.
+- Use the following STRUCTURE and CSS skeleton for a professional template look:
+
+STRUCTURE:
+- Top contact block (candidate details inferred from resume if present)
+- Date
+- Recipient block (company/employer inferred from job image if present)
+- Subject line in bold (e.g., Application for <Role>)
+- Body paragraphs (concise, tailored)
+- Signature with candidate name and contact lines
+
+CSS SKELETON (use inline styles with similar values):
+- Body: font-family: Arial, sans-serif; color:#111; line-height:1.6; font-size:14px; margin:0; padding:24px;
+- Contact block: font-size:12px; color:#555; margin-bottom:16px;
+- Date/recipient: margin: 0 0 12px 0;
+- Subject: font-weight:bold; font-size:16px; margin: 0 0 12px 0;
+- Paragraphs: margin:0 0 10px 0;
+- Signature: margin-top:18px; font-weight:500;
+
+Ensure the final output is a single, valid HTML document with inline CSS only.
 PROMPT;
     }
 

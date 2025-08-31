@@ -704,11 +704,17 @@ PROMPT;
     {
         $this->authorize('view', $application);
         // Render current HTML body to PDF on-the-fly for download
-        $html = view('application.pdf', [
-            'name' => $application->name,
-            'date' => now()->format('Y-m-d'),
-            'body' => $application->body,
-        ])->render();
+        $body = $application->body ?? '';
+        if (stripos($body, '<html') !== false) {
+            // Already a full HTML document from the assistant; render as-is
+            $html = $body;
+        } else {
+            $html = view('application.pdf', [
+                'name' => $application->name,
+                'date' => now()->format('Y-m-d'),
+                'body' => $body,
+            ])->render();
+        }
 
         $options = new Options();
         $options->set('isRemoteEnabled', false);

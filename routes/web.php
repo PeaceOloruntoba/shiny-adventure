@@ -23,9 +23,6 @@ Route::middleware(['auth'])->group(function () {
     Route::get('/app', [ApplicationController::class, 'create'])->name('app');
     Route::post('/generate', [ApplicationController::class, 'store'])->name('application.generate');
     Route::get('/applications', [ApplicationController::class, 'index'])->name('applications.index');
-    Route::get('/applications/{application}/{type}', [ApplicationController::class, 'download'])
-        ->whereIn('type', ['docx', 'pdf'])
-        ->name('applications.download');
     Route::get('/applications/{application}', [ApplicationController::class, 'preview'])->name('applications.preview');
     Route::get('/applications/{application}/pdf', [ApplicationController::class, 'pdf'])->name('applications.pdf');
     Route::delete('/applications/{application}', [ApplicationController::class, 'destroy'])->name('applications.destroy');
