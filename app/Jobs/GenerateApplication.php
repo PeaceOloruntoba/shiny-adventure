@@ -702,7 +702,7 @@ HTML;
         $out = str_replace('{{CANDIDATE_NAME}}', e($candidateName), $out);
 
         // Contact lines/blocks fallbacks using name + email
-        $contactLines = trim(implode(' \u00b7 ', array_values(array_filter([
+        $contactLines = trim(implode(' · ', array_values(array_filter([
             $candidateName ?: null,
             $candidateEmail ?: null,
         ]))));
