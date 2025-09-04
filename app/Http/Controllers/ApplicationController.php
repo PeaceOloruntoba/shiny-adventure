@@ -713,6 +713,7 @@ PROMPT;
                 'name' => $application->name,
                 'date' => now()->format('Y-m-d'),
                 'body' => $body,
+                'headerBg' => data_get($application->meta, 'header_bg_data'),
             ])->render();
         }
 

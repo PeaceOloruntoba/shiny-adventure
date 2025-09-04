@@ -28,6 +28,83 @@ class GenerateApplication implements ShouldQueue
         $this->onQueue('default');
     }
 
+    /**
+     * If the assistant didn't return our A4 template structure, wrap the content into it.
+     * Leaves placeholders for unknown fields. Keeps content body intact.
+     */
+    protected function coerceToTemplate(string $html, string $candidateName): string
+    {
+        $trim = trim($html);
+        // Heuristic: if it already contains our template markers, keep as-is
+        $hasTemplate = (str_contains($trim, 'class="page"') || str_contains($trim, 'class="header-inner"') || str_contains($trim, 'Signature whitespace'));
+        if ($hasTemplate) { return $html; }
+
+        // Extract inner body content if a full HTML document
+        $bodyInner = $trim;
+        if (preg_match('/<body[^>]*>([\s\S]*?)<\/body>/i', $trim, $m)) {
+            $bodyInner = trim($m[1]);
+        }
+
+        // Build template and inject body
+        $date = now()->format('Y-m-d');
+        $template = <<<HTML
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    @page { size: A4; margin: 20mm; }
+    html, body { height: 100%; }
+    body { margin: 0; font-family: Arial, sans-serif; font-size: 14px; color: #111; line-height: 1.55; }
+    .page { width: 170mm; min-height: 257mm; margin: 0 auto; }
+    .header { height: 40mm; border-radius: 6px; background: linear-gradient(135deg,#1f2937 0%,#111827 60%,#0b1220 100%); position: relative; margin-bottom: 10mm; }
+    .header-inner { position:absolute; inset: 0; padding: 10mm; color: #fff; }
+    .header-title { font-size: 16px; font-weight: 700; margin: 0; }
+    .header-sub { font-size: 12px; opacity: .9; margin-top: 2mm; }
+    .meta { color:#555; font-size:11px; margin-bottom: 4mm; }
+    .subject { font-weight:700; font-size:16px; margin:0 0 12px 0; }
+    .content p { margin: 0 0 10px; }
+    .signature { margin-top: 10mm; padding-top: 6mm; border-top: 1px solid #e5e7eb; }
+    .signature-space { height: 18mm; display:block; }
+  </style>
+  <title>Cover Letter — {{CANDIDATE_NAME}}</title>
+  </head>
+<body>
+  <div class="page">
+    <div class="header">
+      <div class="header-inner">
+        <h1 class="header-title">{{CANDIDATE_NAME}}</h1>
+        <div class="header-sub">{{DATE}}</div>
+      </div>
+    </div>
+
+    <div class="meta">{{CONTACT_BLOCK}}</div>
+
+    <div class="content">
+      <div>{{RECIPIENT_BLOCK}}</div>
+      <div class="subject">{{SUBJECT_LINE}}</div>
+      {{BODY_HTML}}
+    </div>
+
+    <div class="signature">
+      <span class="signature-space"></span>
+      <div><strong>{{CANDIDATE_NAME}}</strong></div>
+      <div>{{CONTACT_LINES}}</div>
+    </div>
+  </div>
+</body>
+</html>
+HTML;
+
+        $out = str_replace(
+            ['{{CANDIDATE_NAME}}', '{{DATE}}', '{{BODY_HTML}}'],
+            [e($candidateName), e($date), $bodyInner],
+            $template
+        );
+        // Leave other placeholders intact per requirement
+        return $out;
+    }
+
     protected bool $debug = false;
     public int $timeout = 300; // seconds, worker will kill if longer
     public int $tries = 3;     // retry a few times on failure
@@ -98,6 +175,19 @@ class GenerateApplication implements ShouldQueue
         }
         // Ensure we have valid HTML (assistant may return plain text)
         $resultText = $this->ensureHtml($resultText, $name);
+        // Coerce into our A4 template with header/signature if AI did not follow the template
+        $resultText = $this->coerceToTemplate($resultText, $name);
+
+        // Prepare optional header background (first uploaded image -> base64 data URI)
+        $headerDataUri = $this->makeHeaderDataUri($storedImages);
+
+        // Inject known placeholders: candidate info, contact lines, and header background where applicable
+        $resultText = $this->injectKnownPlaceholders(
+            html: $resultText,
+            candidateName: $name,
+            candidateEmail: $email,
+            headerDataUri: $headerDataUri
+        );
 
         // HTML-only mode: skip fetching/creating DOCX/PDF artifacts.
         $timestamp = now()->format('Ymd_His');
@@ -109,7 +199,7 @@ class GenerateApplication implements ShouldQueue
         // Update application
         $application->body = $resultText; // HTML content expected
         $application->docx_path = null; // no docx in HTML-only mode
-        $this->updateMeta($application, [ 'pdf_rel' => null, 'status' => 'ready' ]);
+        $this->updateMeta($application, [ 'pdf_rel' => null, 'status' => 'ready', 'header_bg_data' => $headerDataUri ]);
         $application->save();
 
         // Email
@@ -579,6 +669,69 @@ HTML;
     {
         // Always log at info level so it shows up without requiring LOG_LEVEL=debug
         Log::info('[AI TRACE] '.$message, $context);
+    }
+
+    /**
+     * If user uploaded any images, convert the first one into a data URI suitable
+     * for inline CSS background-image. Returns empty string if not available.
+     */
+    protected function makeHeaderDataUri(array $storedImages): string
+    {
+        try {
+            $first = $storedImages[0] ?? null;
+            if (!$first) { return ''; }
+            $abs = Storage::disk('public')->path($first);
+            if (!is_file($abs)) { return ''; }
+            $mime = @mime_content_type($abs) ?: 'image/png';
+            $data = base64_encode(file_get_contents($abs));
+            return "data:$mime;base64,$data";
+        } catch (\Throwable $e) {
+            return '';
+        }
+    }
+
+    /**
+     * Replace known placeholders in the template and optionally inject header background
+     * using the provided data URI. Leaves unknown placeholders untouched.
+     */
+    protected function injectKnownPlaceholders(string $html, string $candidateName, string $candidateEmail = '', string $headerDataUri = ''): string
+    {
+        $out = $html;
+
+        // Candidate name placeholders
+        $out = str_replace('{{CANDIDATE_NAME}}', e($candidateName), $out);
+
+        // Contact lines/blocks fallbacks using name + email
+        $contactLines = trim(implode(' \u00b7 ', array_values(array_filter([
+            $candidateName ?: null,
+            $candidateEmail ?: null,
+        ]))));
+        $contactBlock = $contactLines;
+        if ($contactLines === '') { $contactLines = '{{CONTACT_LINES}}'; $contactBlock = '{{CONTACT_BLOCK}}'; }
+
+        $replacements = [
+            '{{CONTACT_LINES}}' => e($contactLines),
+            '{{CONTACT_BLOCK}}' => e($contactBlock),
+            '{{CANDIDATE_EMAIL}}' => e($candidateEmail ?: '{{CANDIDATE_EMAIL}}'),
+            '{{DATE}}' => e(now()->format('Y-m-d')),
+        ];
+        $out = strtr($out, $replacements);
+
+        // Inject header background if provided and not already present
+        if ($headerDataUri) {
+            $hasBgImage = stripos($out, 'background-image:') !== false && stripos($out, 'class="header"') !== false;
+            if (!$hasBgImage) {
+                // Add inline style to the first header container
+                $out = preg_replace(
+                    '/<div([^>]*?)class=\"header\"([^>]*)>/',
+                    '<div$1class="header"$2 style="background-image:url(' . str_replace('/', '\/', $headerDataUri) . '); background-size:cover; background-position:center;">',
+                    $out,
+                    1
+                ) ?? $out;
+            }
+        }
+
+        return $out;
     }
 
     public function failed(\Throwable $e): void
