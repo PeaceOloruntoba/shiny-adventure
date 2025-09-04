@@ -42,7 +42,7 @@
 </head>
 <body>
     <div class="page">
-        <div class="header">
+        <div class="header" @if(!empty($headerBg)) style="background-image:url('{{ $headerBg }}'); background-size:cover; background-position:center;" @endif>
             <div class="header-inner">
                 <h1 class="header-title">{{ $name }}</h1>
                 <div class="header-sub">{{ $date }}</div>

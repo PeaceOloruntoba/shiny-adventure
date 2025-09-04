@@ -46,7 +46,7 @@
             <iframe class="frame" srcdoc="{!! htmlspecialchars($body, ENT_QUOTES) !!}"></iframe>
         @else
             <div class="page">
-                <div class="header">
+                <div class="header" @if(!empty(data_get($application->meta, 'header_bg_data'))) style="background-image:url('{{ data_get($application->meta, 'header_bg_data') }}'); background-size:cover; background-position:center;" @endif>
                     <div class="header-inner">
                         <h1 class="header-title">{{ $application->name }}</h1>
                         <div class="header-sub">{{ now()->format('Y-m-d') }}</div>
