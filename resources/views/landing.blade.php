@@ -53,7 +53,7 @@
                     </div>
                     <div class="mt-5 flex gap-2">
                         <span class="px-2 py-1 text-xs rounded bg-emerald-100 text-emerald-700">AI Generated</span>
-                        <span class="px-2 py-1 text-xs rounded bg-indigo-100 text-indigo-700">DOCX</span>
+                        <span class="px-2 py-1 text-xs rounded bg-indigo-100 text-indigo-700">PDF</span>
                         <span class="px-2 py-1 text-xs rounded bg-amber-100 text-amber-700">History</span>
                     </div>
                 </div>
