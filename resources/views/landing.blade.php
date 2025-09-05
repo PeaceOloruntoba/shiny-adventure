@@ -27,8 +27,8 @@
     <section class="bg-gradient-to-br from-indigo-50 to-white">
         <div class="max-w-7xl mx-auto px-6 py-20 grid md:grid-cols-2 gap-10 items-center">
             <div>
-                <h1 class="text-4xl md:text-5xl font-bold leading-tight">Land your next job faster with AI‑crafted applications</h1>
-                <p class="mt-4 text-lg text-gray-600">Upload your resume and notes, and let our AI generate polished, personalized cover letters and application documents in seconds — ready to download as DOCX and email to recruiters.</p>
+                <h1 class="text-4xl md:text-5xl font-bold leading-tight">Land your next job faster with AI-crafted applications</h1>
+                <p class="mt-4 text-lg text-gray-600">Upload your resume and notes, and let our AI generate polished, personalized cover letters and application documents in seconds — ready to download as PDF and email to recruiters.</p>
                 <div class="mt-8 flex gap-4">
                     @guest
                         <a href="{{ route('register') }}" class="px-6 py-3 rounded-lg bg-indigo-600 text-white font-medium hover:bg-indigo-700">Get Started Free</a>
@@ -39,7 +39,7 @@
                         <a href="{{ route('applications.index') }}" class="px-6 py-3 rounded-lg border border-gray-300 text-gray-800 hover:bg-gray-50">My Applications</a>
                     @endauth
                 </div>
-                <p class="mt-3 text-sm text-gray-500">Multilingual support (EN/DE). Your history is saved. Download in DOCX/PDF soon.</p>
+                <p class="mt-3 text-sm text-gray-500">Multilingual support (EN/DE). Your history is saved. Download in PDF, DOCX coming soon.</p>
             </div>
             <div class="relative">
                 <div class="absolute -inset-4 bg-indigo-100 blur-3xl opacity-40 rounded-3xl"></div>
@@ -73,7 +73,7 @@
             </div>
             <div class="p-6 rounded-xl border">
                 <h3 class="font-semibold text-lg">Professional formats</h3>
-                <p class="mt-2 text-sm text-gray-600">Download in DOCX with our template. PDF export coming soon.</p>
+                <p class="mt-2 text-sm text-gray-600">Download in PDF with our template. DOCX export coming soon.</p>
             </div>
         </div>
     </section>

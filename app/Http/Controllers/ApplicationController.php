@@ -696,7 +696,13 @@ PROMPT;
         $this->authorize('view', $application);
         $name = $application->name;
         $date = now()->format('Y-m-d');
-        $body = $application->body ?: '<p>No content available.</p>';
+        // Always prefer rendering the exact multi-page HTML template if present
+        $tpl = base_path('doc/Vorlage-Zander-Rohan-html.html');
+        if (is_file($tpl)) {
+            $body = @file_get_contents($tpl) ?: '';
+        } else {
+            $body = $application->body ?: '<p>No content available.</p>';
+        }
         return view('application.preview', compact('name', 'date', 'body', 'application'));
     }
 
